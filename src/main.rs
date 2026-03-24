@@ -8,16 +8,20 @@ use pulldown_cmark::{html, Options, Parser as MarkdownParser};
 use serde_json::json;
 use uuid::Uuid;
 
-fn main() -> Result<(), AppError> {
+fn main() {
     let cli = Cli::parse();
-    send_message(cli)
+
+    if let Err(err) = send_message(cli) {
+        println!("{err}");
+    }
 }
 
 fn send_message(cli: Cli) -> Result<(), AppError> {
     let server = cli.server.trim_end_matches('/');
-    let room = urlencoding::encode(&cli.room);
     let access_token = std::fs::read_to_string(&cli.access_token_path)?;
     let access_token = access_token.trim();
+    let room_id = resolve_room_id(server, &cli.room, access_token)?;
+    let room = urlencoding::encode(&room_id);
     let txn_id = Uuid::new_v4().to_string();
     let txn_id = urlencoding::encode(&txn_id);
     let url = format!(
@@ -52,12 +56,16 @@ fn send_message(cli: Cli) -> Result<(), AppError> {
     let payload = serde_json::to_string(&payload)?;
 
     let mut response = ureq::put(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
         .header("Authorization", &format!("Bearer {}", access_token))
         .header("Content-Type", "application/json")
         .send(payload)?;
 
     let status = response.status().as_u16();
     let body = response.body_mut().read_to_string()?;
+    let body = body.trim().to_string();
 
     if status >= 400 {
         return Err(AppError::Api { status, body });
@@ -68,6 +76,38 @@ fn send_message(cli: Cli) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn resolve_room_id(server: &str, room: &str, access_token: &str) -> Result<String, AppError> {
+    if !room.starts_with('#') {
+        return Ok(room.to_string());
+    }
+
+    let alias = urlencoding::encode(room);
+    let url = format!("{}/_matrix/client/v3/directory/room/{}", server, alias);
+    let mut response = ureq::get(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("Authorization", &format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .call()?;
+
+    let status = response.status().as_u16();
+    let body = response.body_mut().read_to_string()?;
+    let body = body.trim().to_string();
+
+    if status >= 400 {
+        return Err(AppError::Api { status, body });
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&body)?;
+    let room_id = value
+        .get("room_id")
+        .and_then(|room_id| room_id.as_str())
+        .ok_or_else(|| AppError::MissingRoomId(body))?;
+
+    Ok(room_id.to_string())
 }
 
 fn render_markdown(input: &str) -> String {

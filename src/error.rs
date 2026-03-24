@@ -11,6 +11,9 @@ pub enum AppError {
     #[error("request error: {0}")]
     Ureq(#[from] ureq::Error),
 
+    #[error("missing room_id in alias lookup response: {0}")]
+    MissingRoomId(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
